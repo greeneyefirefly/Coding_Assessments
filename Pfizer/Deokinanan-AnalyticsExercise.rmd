@@ -1,6 +1,6 @@
 ---
 title: "Deokinanan - Analytics Exercise"
-date: "18 Februray, 2021"
+date: "28 Februray, 2021"
 output: 
   html_document
 ---
