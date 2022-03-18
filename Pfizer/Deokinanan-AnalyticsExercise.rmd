@@ -1,0 +1,590 @@
+---
+title: "Deokinanan - Analytics Exercise"
+date: "18 Februray, 2021"
+output: 
+  html_document
+---
+
+### This assessment was given as a part of Pfizer recruitment for graduate co-ops in 2021 which I was offered. I successfully completed my co-ops in August, 2021.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, error=FALSE, warning=FALSE, message=FALSE, fig.align="center")
+
+#htmltools::tagList(rmarkdown::html_dependency_font_awesome())
+
+# Loading required R packages
+library(tidyverse)
+library(kableExtra)
+library(readxl)
+library(psych)
+library(outliers)
+library(ggpubr)
+library(car)
+library(mice)
+library(caret)
+library(pROC)
+```
+
+### 
+
+```{r loaddata1}
+# Load the data 
+drug390 = read_excel("C:/Users/Deokinanan/Desktop/Pfizer/Analytics_Exercise_Graduate.xlsx", sheet = "Patient_Drug390_Test_Flags", range = "B4:F41", col_names = TRUE, col_types = c("text", "text", "text", "text", "text"))
+
+admission = read_excel("C:/Users/Deokinanan/Desktop/Pfizer/Analytics_Exercise_Graduate.xlsx", sheet = "Patient_Drug_Admin_Date", range = "B4:C343", col_names = TRUE, col_types = c("text", "date"))
+```
+
+```{r HRvariable}
+# Create hormone receptor variable
+drug390$HR_positive = ifelse(drug390$ER_positive == "1" | drug390$PR_positive == "1", "1", "0")
+```
+
+#### *Assessment #1 - Drug 390* 
+
+There were 37 patients, 14 (38%) of whom received Drug 390 and 23 (62%) have not. 
+The length of treatment for each patient can vary. Many factors affect an individual's length of treatment. These can include symptom level, genetics, environmental factors, and even a patient's demographics. Given that the data is limited, there is no standard way of determining the length of treatment for a patient. Moreover, there is no information on what defines a treatment length. In other words, treatment length for a patient could be considered as the number of drug administration sessions, the number of days that elapsed between drug administrations, the total number of days that elapsed from the first drug administration date to the last, etc. 
+
+To find an optimal way of computing the length of treatment for each patient, an investigation of the number of drug administration sessions and the number of days that elapsed between drug administrations was conducted. The following metrics were used to additionally define the days elapsed between treatment per patient:
+
+- Arithmetic mean: # of days elapsed divided by # of administrations 
+- Arithmetic median: 50th percentile # of days elapsed 
+- Geometric mean: the nth root of the product of the n administrations
+
+```{r treatment_count}
+# Number of treatment administered per patient
+drug390 = merge(drug390, count(admission, Patient_ID), 
+                by.x = "Patient_ID", by.y = "Patient_ID", all.x = TRUE) %>%
+  rename(treatment_count = n)
+```
+
+```{r days_elasped, include=FALSE}
+# Order data by date in ascending order, then Patient ID
+admission[order(as.Date(admission$Drug_admin_date, format = "%d/%m/%Y")),]
+admission[order(admission$Patient_ID),]
+
+# Days elapsed between treatment administrations
+for (i in c(1:338)){
+  admission$days_elasped[1] = 0
+  diff = difftime(admission$Drug_admin_date[i+1],
+                  admission$Drug_admin_date[i])
+  if (admission$Patient_ID[i] != admission$Patient_ID[i+1]){
+    admission$days_elasped[i+1] = 0
+  } else{
+    admission$days_elasped[i+1] = diff
+  }
+}
+```
+
+```{r mean}
+# Arithmetic mean of days elapsed between treatment administrations
+avg_days_elasped = admission %>% group_by(Patient_ID) %>% summarise(across(starts_with("days"), mean))
+
+drug390 = merge(drug390, avg_days_elasped, 
+                by.x = "Patient_ID", by.y = "Patient_ID", all.x = TRUE) %>%
+  rename(avg_days_elasped = days_elasped)
+```
+
+```{r median}
+# Arithmetic median of days elapsed between treatment administrations
+median_days_elasped = admission %>% group_by(Patient_ID) %>% summarise(across(starts_with("days"), median))
+
+drug390 = merge(drug390, median_days_elasped, 
+                by.x = "Patient_ID", by.y = "Patient_ID", all.x = TRUE) %>%
+  rename(median_days_elasped = days_elasped)
+```
+
+```{r geo_mean}
+# Geometric mean of days elapsed between treatment administrations
+gm_days_elasped = admission %>% 
+  filter_at(vars(days_elasped), all_vars((.) != 0)) %>%
+  group_by(Patient_ID) %>% 
+  summarise(across(starts_with("days"), geometric.mean))
+
+drug390 = merge(drug390, gm_days_elasped, 
+                by.x = "Patient_ID", by.y = "Patient_ID", all.x = TRUE) %>%
+  rename(gm_days_elasped = days_elasped) %>% replace(is.na(.), 0)
+```
+
+The treatment frequency ranges from 1 to 21 administrations, and it is positively skewed (mode = 5). Moreover, by looking at the empirical cumulative distribution function plot for the treatment counts, nearly 50% of the patients were administered a drug 8 times or less. Whereas, for evaluating the days elapsed between treatment, the mean, median and geometric mean are determined. The CDF highlights that the average days elapsed between treatment is 262 days and has a percentile of 63%, i.e. 63% of the patients were on the treatment for 262 days or less. The median, central value is 171 days, and the geometric mean is 127 days, at 41%.
+
+```{r cdf_tc}
+# CDF for treatment count
+e_tc = ecdf(drug390$treatment_count)
+p1 = ggplot() + 
+  stat_ecdf(data = drug390, aes(treatment_count), geom = "line", size = .6) +
+  theme_minimal() +
+  labs(title = "CDF - Treatment Count", 
+       x = "Length of Treatment, count",
+       y = "Probability") + 
+  geom_point(aes(x = 8.1, y = 0.5), color = "blue", size = 2) +
+  annotate("text", x = 12, y = 0.5, label = "Count = 8 @ 48%", size=3) 
+```
+
+```{r cdf_metrics, fig.width= 8, fig.height=4}
+# CDF for Days elapsed
+all = admission %>% 
+  filter_at(vars(days_elasped), all_vars((.) != 0)) 
+mean = mean(all$days_elasped)
+median = median(all$days_elasped)
+geometric_mean = all %>% 
+  filter_at(vars(days_elasped), all_vars((.) != 0)) %>% 
+  summarise(across(starts_with("days"), geometric.mean))
+
+e_all = ecdf(all$days_elasped)
+
+p2 = ggplot() +
+  stat_ecdf(data = all, aes(days_elasped), 
+            alpha = 0.8, geom = "line", size = .6) +
+  theme_minimal() +
+  labs(title = "CDF - Metrics on Days Elapsed", 
+       x = "Length of Treatment, Day",
+       y = "Probability") +
+  scale_color_discrete(name = "Metrics", 
+                       labels = c("Mean", "Median", "GM")) +
+  geom_point(aes(x = 262, y = 0.63), color = "blue", size = 2) +
+  geom_point(aes(x = 171, y = 0.50), color = "blue", size = 2) +
+  geom_point(aes(x = 127, y = 0.41), color = "blue", size = 2) +
+  annotate("text", x = 640, y = 0.65, 
+           label = "mean = 262 days @ 63%", size=3) +  
+  annotate("text", x = 570, y = 0.52, 
+           label = "med = 171 days @ 50%", size=3) +  
+  annotate("text", x = 560, y = 0.43, 
+           label = "GM = 127 days @ 41%", size=3) 
+
+gridExtra::grid.arrange(p1,p2, ncol = 2)
+```
+
+Furthermore, the results suggest that there is no evidence in the data of a pattern or variable that can explain the differences in time elapsed between consecutive drug administrations and the number of treatments [TEST #1]. This suggests that there is no relationship between having more drug administration sessions and the days that elapsed between treatment. Moreover, the factors for days elapsed tend to be more positively skewed than treatment count with kurtosis far from a representation of normality [TEST #2]. Lastly, the differences between groups using treatment count can be visually seen [TEST #3]. Therefore, the length of treatment was computed to be the number of drug administrations a patient received.
+
+<center> Fig 1: Distribution of Drug Group and Treatment Length </center>
+
+```{r density_dr390, fig.width=9,fig.height=3}
+# Density plot by drug type
+p1 = drug390 %>% ggplot(aes(x = treatment_count, 
+                            fill=drug_390_admin_flag)) +
+  geom_density(color="#e9ecef", alpha=0.4, position = 'identity') +
+  scale_fill_manual(values=c("#69b3a2", "#404080")) +
+  theme_minimal() +
+  theme(legend.position = "top")+
+  labs(fill="Drug",x = "Treatment Count")
+
+# Boxplot by drug type
+p2 = drug390 %>% ggplot(aes(x = drug_390_admin_flag, 
+                            y = treatment_count, 
+                            fill=drug_390_admin_flag )) + 
+  scale_fill_manual(values = c("#69b3a2", "#404080")) +
+  geom_boxplot(alpha = 0.4, outlier.shape = NA) + 
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(x = "Drug Group", y = "Treatment Count")
+
+# Quantile-Quantile plot by drug type
+p3 = ggqqplot(drug390, x = "treatment_count", color = "drug_390_admin_flag", 
+              palette = c("#69b3a2", "#404080"),
+              ggtheme = theme_minimal()) +
+  theme(legend.position = "none") +
+  labs(y = "Treatment Count")
+
+gridExtra::grid.arrange(p1,p2,p3,ncol = 3)
+```
+
+There is an interest in how the length of treatment is distributed by the drug groups. Figure 1 highlights the variations between drug groups. According to a two sampled t-test and with a 95% confidence level, there is evidence that the length of treatment of patients treated with the generic drug is statistically different from those treated with Drug 390, t = 2.068, p = 0.046 [TEST #4]. The mean length of treatment for patients treated with the generic drug is 10.35 administrations ($\pm 5.10$) whereas those treated with Drug 390 have a mean treatment length of 7.21 administrations ($\pm 4.04$). Further considering the length of treatment by the drug type and by the hormone status of the patients, it was found that there is no evidence that there is an interaction between the effects of drug type and hormone type on treatment length [F(7, 132) = 0.447, p = 0.870] [TEST #5]. 
+
+Lastly, if a predictive model is of interest, a good target would be the length of treatment or drug type. However, given this data set and the analysis carried out, it shows that the likely predictor for each is the other. That is, there are no other likely predictors within this data set that can predict the length of treatment except drug type, and there are no other likely predictors within this data set that can predict drug type except treatment length. In the end, a predictive model is not currently feasible, whether supervised or unsupervised, unless more data-information is obtained. 
+
+####
+***
+<center> Supporting Analysis & Interpretation </center>
+
+***  
+[TEST #1]  
+Does the treatment count influence the days elapsed between treatments? No, from the investigative plots and analysis, the relationships are nonlinear. 
+
+```{r avg_linear, fig.height=3, fig.width=4, include=FALSE}
+# Average length of treatment
+p1 = ggscatter(drug390, 
+               x = "avg_days_elasped", 
+               y = "treatment_count", 
+               add = "reg.line", conf.int = TRUE, 
+               cor.coef = TRUE, cor.method = "pearson",
+               title = "Mean Days Elasped",
+               xlab = "",
+               ylab = "Count")
+
+p11 = gridExtra::arrangeGrob(p1, gridExtra::arrangeGrob(
+  ggqqplot(drug390$treatment_count),   
+  ggqqplot(drug390$avg_days_elasped),
+  ncol=2), nrow=2)
+
+cor.test(drug390$treatment_count, drug390$avg_days_elasped, method = "pearson")
+```
+
+```{r med_linear, fig.height=3, fig.width=4, include=FALSE}
+# Median length of treatment
+p1 = ggscatter(drug390, 
+               x = "median_days_elasped", 
+               y = "treatment_count", 
+               add = "reg.line", conf.int = TRUE, 
+               cor.coef = TRUE, cor.method = "pearson",
+               title = "Median Days Elasped", 
+               xlab = "",
+               ylab = "Count")
+
+p12 = gridExtra::arrangeGrob(p1, gridExtra::arrangeGrob(
+  ggqqplot(drug390$treatment_count),   
+  ggqqplot(drug390$median_days_elasped),
+  ncol=2), nrow=2)
+
+cor.test(drug390$treatment_count, drug390$median_days_elasped, method = c("pearson", "kendall", "spearman"))
+```
+
+```{r gm_linear, fig.height=3, fig.width=4, include=FALSE}
+# Geometric mean length of treatment
+p1 = ggscatter(drug390, 
+               x = "gm_days_elasped", 
+               y = "treatment_count", 
+               add = "reg.line", conf.int = TRUE, 
+               cor.coef = TRUE, cor.method = "pearson",
+               title = "G-Mean Days Elasped", 
+               xlab = "",
+               ylab = "Count")
+
+p13 = gridExtra::arrangeGrob(p1, gridExtra::arrangeGrob(
+  ggqqplot(drug390$treatment_count),   
+  ggqqplot(drug390$gm_days_elasped),
+  ncol=2), nrow=2)
+
+cor.test(drug390$treatment_count, drug390$gm_days_elasped, method = c("pearson", "kendall", "spearman"))
+```
+
+```{r day_plot, fig.width=9}
+gridExtra::grid.arrange(p11,p12,p13, ncol=3)
+```
+
+***
+
+[TEST #2]  
+Is there a difference among groups with treatment count and days elapsed in terms of common statistical measurements? Yes, among groups for each variable, days elapsed variables tend to be positively skewed with a high absolute kurtosis than compared to treatment count variable. Therefore, it is suggested that while normality can be achieved via transformation, little to no transformation is necessary when treatment count is considered the length of treatment measurement.
+
+```{r diff_tb, include=FALSE}
+# Change variable to see summary statistics
+variable_index = drug390$drug_390_admin_flag
+summarystat = summarytools::stby(data = drug390[, 7:10], 
+                                 INDICES = variable_index, 
+                                 FUN = psych::describe)
+kable(summarystat[[1]][,-c(1,7)], 
+      caption = "Group = 0", 
+      digit = 2L)
+kable(summarystat[[2]][,-c(1,7)], 
+      caption = "Group = 1", 
+      digit = 2L)
+```
+
+***
+
+[TEST #3]  
+Can treatment count be used as the method to assess the length of treatment that appears to capture the subtle differences between groups? Yes, these density plots are used to study the distribution of the variables and show that between-group differences may exist. Some distributions are bimodal, while others have higher peaks.
+
+```{r, fig.width=8, fig.height=4}
+# Density plots by drug type and hormone
+p1 = drug390 %>% ggplot(aes(x=treatment_count, fill=drug_390_admin_flag)) +
+    geom_density(color="#e9ecef", alpha=0.4, position = 'identity') +
+    scale_fill_manual(values=c("#69b3a2", "#404080")) +
+    theme_minimal() +
+    labs(fill="Drug", x = "Treatment Count")
+
+p2 = drug390 %>% ggplot(aes(x=treatment_count, fill=ER_positive)) +
+    geom_density(color="#e9ecef", alpha=0.4, position = 'identity') +
+    scale_fill_manual(values=c("#69b3a2", "#404080")) +
+    theme_minimal() +
+    labs(fill="ER +", x = "Treatment Count")
+
+p3 = drug390 %>% ggplot(aes(x=treatment_count, fill=PR_positive)) +
+    geom_density(color="#e9ecef", alpha=0.4, position = 'identity') +
+    scale_fill_manual(values=c("#69b3a2", "#404080")) +
+    theme_minimal() +
+    labs(fill="PR +", x = "Treatment Count")
+
+p4 = drug390 %>% ggplot(aes(x=treatment_count, fill=HER2_positive)) +
+    geom_density(color="#e9ecef", alpha=0.4, position = 'identity') +
+    scale_fill_manual(values=c("#69b3a2", "#404080")) +
+    theme_minimal() +
+    labs(fill="HER2 +", x = "Treatment Count")
+
+p5 = drug390 %>% ggplot(aes(x=treatment_count, fill=HR_positive)) +
+    geom_density(color="#e9ecef", alpha=0.4, position = 'identity') +
+    scale_fill_manual(values=c("#69b3a2", "#404080")) +
+    theme_minimal() +
+    labs(fill="HR +", x = "Treatment Count")
+
+gridExtra::grid.arrange(p5,p2,p3,p1,p4, nrow = 2)
+```
+
+***
+
+[TEST #4]  
+Is there a difference between drug groups and the length of treatment? Yes, at the 95% confidence interval, the t-test p-value < 0.05. The plots of patients who use Drug 390 versus the generic are shown below. It appears that those who were given Drug 390 are not normally distributed based on the density plot, but the boxplot, Q-Q plot, and the Shapiro-Wilk normality test all indicate that the distributions of the treatment count are not significantly different from a normal distribution. Thus, a two-sample test of difference is conducted to compare the two unrelated groups of samples.
+
+```{r df_drug_norm, include=FALSE}
+# Test for normality between groups
+shapiro.test(drug390[drug390$drug_390_admin_flag == "0", "treatment_count"])
+shapiro.test(drug390[drug390$drug_390_admin_flag == "1", "treatment_count"])
+```
+
+```{r df_drug, include=FALSE}
+# Test for group differences
+t.test(treatment_count ~ drug_390_admin_flag, data = drug390)
+```
+
+***
+
+[TEST #5]  
+Is there a difference between drug groups hormone and length of treatment? No. The Pearson’s chi-squared test of independence is used to determines whether or not there exists a statistical dependence between drug type and hormone groups. This resulted in their independence, $\chi^{2}$ = 0.67, p > 0.05. Moreover, the length of treatment by Drug 390 versus the generic by hormone status patients is investigated using two-way ANOVA. The residuals are nearly normally distributed, and the Levene Test suggests that equal variance can be assumed (p-value > 0.05). It was already established that there is a main effect between the drug type and length of treatment. The results of the two-way ANOVA and posthoc tests suggest that there is no evidence that there is an interaction between the effects of drug type and hormone type on treatment length [F(7, 132) = 0.447, p = 0.870]. It may be worth mentioning that from the posthoc test, the interaction between Generic - PR Positive and Drug 390:ER Positive showed some effect, p < 0.05, but without evidence of an interaction effect, it is meaningless. 
+
+```{r chi, include=FALSE}
+# Transform data into a long format
+data = gather(drug390, "hormone", "positive", 3:6)
+data$hormone = gsub("_positive", "", data$hormone)
+data$drug_390_admin_flag = factor(data$drug_390_admin_flag, 
+                                  labels = c("Generic", "Drug 390"))
+data$positive = factor(data$positive, labels = c("Negative", "Positive"))
+data$hormone_positive = paste(data$hormone, data$positive)
+
+# Contingency Table of drug type by hormone type
+table(data$drug_390_admin_flag, data$hormone_positive)
+
+# Chi-Square Test for association
+chisq.test(data$drug_390_admin_flag, data$hormone_positive, correct = F)
+```
+
+```{r anova2, include=FALSE}
+# Two-way ANOVA Test
+anova2 = aov(treatment_count ~ drug_390_admin_flag*hormone_positive, data = data)
+
+# Histogram of residual
+hist(anova2$residuals, main = "Histogram of Residuals", xlab = "Residuals")
+
+# Levene test of homogeneity
+leveneTest(treatment_count ~ drug_390_admin_flag*hormone_positive, data = data)
+
+# ANOVA summary 
+summary(anova2)
+
+# Post-hoc using Tukey range test
+TukeyHSD(anova2)
+```
+
+```{r drug_hr_box}
+# Boxplot by drug type and hormone type
+data %>% ggplot(aes(x = hormone, 
+                    y = treatment_count, 
+                    fill=positive )) + 
+  facet_wrap(~drug_390_admin_flag) +
+  scale_fill_manual(values = c("#69b3a2", "#404080")) +
+  geom_boxplot(alpha = 0.4, outlier.shape = NA) + 
+  theme_minimal() +
+  labs(fill="", x = "Hormone", y = "Treatment Count", 
+       title ="Boxplot of Hormone by Drug Groups")
+```
+
+```{r drug_hr_int}
+# Interaction plot
+interaction.plot(x.factor = data$drug_390_admin_flag,
+                 trace.factor = data$hormone_positive,
+                 response = data$treatment_count,
+                 fun = function(x) mean(x, na.rm = TRUE),
+                 type= "b",
+                 col = c("black","red","green"),  
+                 pch = c(19, 17, 15),             
+                 fixed = TRUE,                  
+                 leg.bty = "o",
+                 xlab = "Drug Groups",
+                 ylab = "Treatment Count",
+                 trace.label = "Hormone & Status",
+                 main = "Interaction Plot")
+```
+
+***
+***
+### 
+ 
+```{r loaddata2}
+# Load the data 
+heart_disease = read_excel("C:/Users/Deokinanan/Desktop/Pfizer/Analytics_Exercise_Graduate.xlsx", 
+    sheet = "Heart_Disease_Patient_Data", 
+    col_types = c("numeric", "text", "text", 
+        "numeric", "numeric", "text", "text", 
+        "numeric", "text", "numeric", "text", 
+        "numeric", "text", "text"))
+
+data_des = read_excel("C:/Users/Deokinanan/Desktop/Pfizer/Analytics_Exercise_Graduate.xlsx", 
+    sheet = "Heart_Disease_Patient_Data_Dict", 
+    range = "B4:C18")
+```
+
+#### *Assessment #2 - Heart Disease* 
+
+```{r}
+kable(data_des, caption = "Data Dictionary") %>% kable_styling(bootstrap_options = "striped", full_width = F, position = "float_left", font_size = 7)
+```
+
+To begin, the following assumptions were made upon the investigation of the predictor variables because the categorical variables did not have all the level descriptions provided in the Data Dictionary. Therefore, generic levels/categories are used as labels, e.g. a category of `restecg` 1 is considered as Level 1, etc. Specific to the variable `thal`, which is missed labeled in both the Data Dictionary and in the data itself, i.e. there are 3 numeric label descriptions that do not correspond with the 4 levels in the data, thus, to avoid error in the analysis and interpretation, it was not included in this assessment. Lastly, given these are unprovided categorical labels in the data description, it is assumed that "0" is not considered missing data.
+
+There are 303 patients in this data set, 165 (54.4%) with heart disease and 138 (45.5%) without heart disease. Patients' demographics and health data are provided, and there is an interest in a predictive model that can identify the main contributing factors towards heart disease. There are many classification and regression models that can capture these factors with high accuracy. Therefore, three models were trained, namely, a binary logistic regression, random forest, and linear discriminant analysis. After goodness-of-fit evaluation and cross-validation, it was determined that a random forest model outperforms the other models. 
+
+The optimal model evaluation resulted in 85.1% of the predicted results that seem to be correctly classified. The precision also suggests that 81.2% of those with heart disease were correctly classified among all the patients predicted to have heart disease. These results represent that the model does a pretty good job classifying patients on whether or not they have heart disease. And lastly, the Kappa statistic, which is a measure of agreement between the predictions and the actual labels, suggests that the overall accuracy of this model is substantially better than the expected random chance classifier's accuracy, $\kappa$ = 0.70.
+
+```{r sumstat}
+# Creating factors
+cols = c("sex","cp","fbs","restecg", "exang","slope","ca", "target")
+heart_disease[, cols] = lapply(heart_disease[, cols], factor)
+# Creating factor levels
+levels(heart_disease$sex) = c("female", "male")
+levels(heart_disease$fbs) = c("false", "true")
+levels(heart_disease$exang) = c("no", "yes")
+levels(heart_disease$target) = c("no", "yes")
+heart_disease = heart_disease %>% select(-c("thal"))
+# summary(heart_disease)
+```
+
+```{r box, fig.width=6, include=FALSE}
+# Assessing outliers and skewness
+df = heart_disease %>% select(where(is.numeric))
+par(mfrow = c(3,2))
+for (i in c(1:length(df))){
+  boxplot(
+    df[i], main = sprintf("%s", names(df)[i]), col = "steelblue2", horizontal = TRUE, 
+    xlab = sprintf("skewness = %1.2f      # of outliers = %d", psych::describe(df)[i,11], 
+                   length(boxplot(df[i], plot = FALSE)$out)))
+}
+```
+
+```{r corrgram, fig.width=3, fig.height=3, include=FALSE}
+# Assessing correlation
+corrplot::corrplot(cor(df, use = 'complete.obs'),
+         method = 'ellipse', type = 'lower', order = 'hclust',
+         hclust.method = 'ward.D2', tl.cex = 0.7)
+```
+
+```{r outlier}
+# Outlier check 
+# grubbs.test(heart_disease$chol) # upper bound significant
+# grubbs.test(heart_disease$chol, opposite = TRUE)
+# grubbs.test(heart_disease$oldpeak) # upper bound significant
+# grubbs.test(heart_disease$oldpeak, opposite = TRUE)
+
+upper_bound = quantile(heart_disease$chol, 0.99)
+idx1 = which(heart_disease$chol > upper_bound)
+
+upper_bound = quantile(heart_disease$oldpeak, 0.99)
+idx2 = which(heart_disease$oldpeak > upper_bound)
+heart_disease = heart_disease[-c(idx1,idx2), ]
+```
+
+```{r trainTestSplit}
+# Create training and testing split from training data
+set.seed(525)
+intrain = createDataPartition(heart_disease$target, p = 0.70, list = FALSE)
+
+# Train & Test predictor variables
+train.p = heart_disease[intrain, ] %>% select(-target)
+test.p = heart_disease[-intrain, ] %>% select(-target)
+
+# Train & Test target variable 
+train.r = heart_disease$target[intrain]
+test.r = heart_disease$target[-intrain]
+```
+
+```{r normality}
+set.seed(525)
+# Train set
+processed_df = preProcess(train.p)
+train.p =  predict(processed_df, train.p)
+
+# Test set
+processed_df = preProcess(test.p)
+test.p =  predict(processed_df, test.p)
+```
+
+```{r tree_reg, include=FALSE}
+# binary logistic regression model
+set.seed(525)
+log.model = train(x = train.p, y = train.r,
+                  method = "glmStepAIC",
+                  trControl = trainControl(method = "repeatedcv",
+                                           classProbs = TRUE,
+                                           number = 10,
+                                           summaryFunction = twoClassSummary),
+                  family = binomial(link = "logit"),
+                  trace = 0)
+
+# random forest tree
+rf.model = train(x = train.p, y = train.r,
+                 method = "rf", tuneLength = 10,
+                 trControl = trainControl(method = "cv"))
+
+# linear discriminant analysis
+stepLDA.model = train(x = train.p,
+                  y = train.r,
+                  method = "stepLDA",
+                  tuneGrid = data.frame(maxvar = 4, direction = "both"))
+```
+
+```{r accuracy, eval=FALSE}
+accuracy = function(models, predictors, response){
+  acc = list()
+  i = 1
+  for (model in models){
+    predictions = predict(model, newdata = predictors)
+    acc[[i]] = postResample(pred = predictions, obs = response)
+    i = i + 1
+  }
+  names(acc) = c("log", "rf", "lda")
+  return(acc)
+}
+
+models = list(log.model, rf.model, stepLDA.model)
+accuracy(models, test.p, test.r)
+```
+
+```{r conf_max_logit, include=FALSE}
+set.seed(525)
+# Confusion Matrix
+summary(rf.model)
+pred.P = predict(rf.model, newdata = test.p, type = "prob")
+pred.R = predict(rf.model, newdata = test.p, type = "raw")
+
+confusionMatrix(pred.R, test.r, mode = "everything")
+```
+
+Let's look at the two following graphics. Figure 1 is from a receiver operating characteristic (ROC) analysis. The area under the curve (AUC), and its 95% confidence interval, was estimated for observed heart disease and their predicted values by fitting a random forest regression model. The AUC for the predicted heart disease is 77.1% (95% CI: 68.2%–85.9%). There is a 77.1% chance that the model will be able to distinguish between patients with heart disease and those without. 
+
+<center> Fig 1: ROC of the Random Forest Model </center>
+
+```{r roc}
+ROC_obj = roc(test.r, as.numeric(pred.R),
+              smoothed = TRUE, ci = TRUE, ci.alpha = 0.95,
+              percent = TRUE, stratified = FALSE, plot = TRUE,
+              auc.polygon = TRUE, max.auc.polygon = TRUE, 
+              grid = TRUE, print.auc = TRUE, show.thres = TRUE)
+
+sens.ci = ci.se(ROC_obj)
+plot(sens.ci, type = "shape", col = "lightblue")
+plot(sens.ci, type = "bars")
+```
+
+In Figure 2, variable importance refers to how much a variable is utilizes by a model to make predictions. It is the sum of the decrease in error when split by a variable in tree models. In this case, the predictor that is most contributing in determining whether a patient can be classified into having heart disease or not is based on the maximum heart rate achieved (`thalach`), followed by chest pain type (`cp`), number of major vessels (0|3) colored by fluoroscopy (`ca`), and so forth. The least contributing factor is whether a patient has a fasting blood sugar > 120 mg/dl or not (`fbs`). Therefore, knowing these variables that contribute the most to the prediction, accurate classification can be performed.
+
+<center> Fig 2: Variable Importance of the Random Forest Model </center>
+
+```{r varimp}
+dotPlot(varImp(rf.model))
+```
+
+***
+<center> Supporting Analysis & Interpretation  </center>
+***
+
+Data exploration revealed that some variables may be strongly influenced by outliers. Outliers in the data could distort predictions and affect the accuracy, and the Grubbs test uncovered that `chol` and `oldpeak` possess potential outliers. Using the IQR criterion at 99%, these were removed. Moreover, most of the numeric variables were fairly uncorrelated with one another. There is `thalach` with `age` and `oldpeak` being a moderate, negative correlated variables, $\rho$ = -0.39 and -0.34, respectively. 
+
+All the models were trained on the same approximately 70% of the training set, reserving 30% for validation of which model to select for the target estimation on the test set. To find the optimal fit and account for a parsimonious model, variable selection will be implemented, and the optimal fit is found using both forward and backward stepwise-regression based on the Akaike information criterion. The stepwise AIC method will be used to select the best model from an information-criterion perspective, therefore cross-validation is not conducted for the logisitic and LDA models, and this will further help to produce a parsimonious model. In the end, the optimal model was the random forest model with an accuracy of 79.3% and $\kappa$ = 0.57 on the training set, and returns an accuracy of 77.1% on the test set.
